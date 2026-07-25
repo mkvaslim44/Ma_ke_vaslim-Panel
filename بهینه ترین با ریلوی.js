@@ -1251,7 +1251,7 @@ const SubscriptionService = {
 
 			if (!ipOrDomain || !port) return;
 
-			const remark = `${customName}--->🇳🇱 ${info}`;
+			const remark = `${customName} ${info}`;
 			const lowerName = (customName || "").toLowerCase();
 
 			let currentFragment = "&fragment=100-200,10-20";
