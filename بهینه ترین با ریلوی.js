@@ -13,11 +13,6 @@ const USERS_LIST_CACHE = { data: null, lastFetch: 0 };
 const LUT_HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 let GLOBAL_REQ_COUNT = 0;
 let GLOBAL_LAST_REQ_WRITE = 0;
-const RAILWAY_BACKENDS = [
-	"makevaslim44-production.up.railway.app",
-	"seyed84-production.up.railway.app",
-	"manvaslam-production-07a1.up.railway.app"
-];
 const DNS_CACHE_TTL = 5 * 60 * 1000;
 const DOH_RESOLVER = "https://1.1.1.1/dns-query";
 const UPSTREAM_BUNDLE_TARGET_BYTES = 32 * 1024;
@@ -276,13 +271,6 @@ export default {
 			}
 		}
 
-		if (Router.isWebSocketUpgrade(request) && url.pathname.startsWith("/railway-io/")) {
-			const extractedUuid = url.pathname.split("/")[2];
-			if (extractedUuid) {
-				return await handleRailwayWS(request, env, ctx, extractedUuid);
-			}
-		}
-
 		if (Router.isWebSocketUpgrade(request) && url.pathname.startsWith("/p/")) {
 			const pathParts = url.pathname.split("/");
 			if (pathParts.length >= 4 && pathParts[3] === "Ma_Ke_Vaslim") {
@@ -308,7 +296,7 @@ export default {
 		if (url.pathname.startsWith("/api/") || url.pathname === "/locations") {
 			return await Router.handleApi(request, url, env, ctx);
 		}
-		if (url.pathname === "/panel" || url.pathname === "/login") {
+		if (url.pathname === "/mkv" || url.pathname === "/login") {
 			return await Router.handlePanel(request, env);
 		}
 		if (url.pathname.startsWith("/status/")) {
@@ -1289,24 +1277,6 @@ const SubscriptionService = {
 				links.push(directLink);
 			}
 
-			            const masterUuid = "e5b8a6a1-a7b3-4f16-89d2-97b7914db459";
-
-			const railwayRemark = `${customName}🛰️ریلوی-->🇳🇱 ${info}`;
-			const railwayPath = `/railway-io/e5b8a6a1-a7b3-4f16-89d2-97b7914db459`;
-			const railwayParams = new URLSearchParams({
-				encryption: "none",
-				security: "tls",
-				sni: MY_SECRET_DOMAIN || host,
-				host: MY_SECRET_DOMAIN || host,
-				fp: fp,
-				type: "ws",
-				path: railwayPath,
-				alpn: "h2,http/1.1"
-			});
-			let rLink = `vless://${masterUuid}@${ipOrDomain}:${port}?${railwayParams.toString()}${currentFragment}`;
-			if (extraParams) rLink += `&extraParams=${extraParams}`;
-			rLink += `#${encodeURIComponent(railwayRemark)}`;
-			links.push(rLink);
 		});
 
 		const subContent = btoa(unescape(encodeURIComponent(links.join("\n"))));
@@ -2818,195 +2788,7 @@ async function connectHttp(proxyStr, destAddr, destPort, initialData) {
 		throw e;
 	}
 }
-async function handleRailwayWS(request, env, ctx, userUuid) {
-	const user = await env.DB.prepare("SELECT username, is_active, limit_gb, used_gb, limit_req, used_req FROM users WHERE uuid = ?").bind(userUuid).first();
-	if (!user || user.is_active === 0) {
-		return new Response("Access Denied", { status: 403 });
-	}
 
-	const username = user.username;
-
-	const cachedBytes = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
-	if (user.limit_gb && ((user.used_gb || 0) + (cachedBytes / (1024 * 1024 * 1024))) >= user.limit_gb) {
-		return new Response("Volume Exceeded", { status: 403 });
-	}
-
-	const cachedReqs = USER_REQ_CACHE.get(username) || 0;
-	if (user.limit_req && ((user.used_req || 0) + cachedReqs) >= user.limit_req) {
-		return new Response("Request Limit Exceeded", { status: 403 });
-	}
-	USER_REQ_CACHE.set(username, cachedReqs + 1);
-
-	let activeCount = ACTIVE_CONNECTIONS_COUNT.get(username) || 0;
-	ACTIVE_CONNECTIONS_COUNT.set(username, activeCount + 1);
-
-	function addBytes(bytes) {
-		if (bytes <= 0) return;
-		let current = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
-		GLOBAL_TRAFFIC_CACHE.set(username, current + bytes);
-		GLOBAL_LAST_ACTIVE_WRITE.set(username, Date.now());
-
-		if (GLOBAL_WRITE_LOCK.get(username)) return;
-
-		let lastDbWrite = GLOBAL_LAST_DB_WRITE.get(username) || 0;
-		let now = Date.now();
-		let thresholdBytes = 10 * 1024 * 1024;
-
-		if (current >= thresholdBytes || (current > 0 && now - lastDbWrite > 60000)) {
-			GLOBAL_WRITE_LOCK.set(username, true);
-			let toCommit = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
-			let toCommitReq = USER_REQ_CACHE.get(username) || 0;
-
-			if (toCommit <= 0 && toCommitReq <= 0) {
-				GLOBAL_WRITE_LOCK.set(username, false);
-				return;
-			}
-
-			GLOBAL_TRAFFIC_CACHE.set(username, 0);
-			USER_REQ_CACHE.set(username, 0);
-			GLOBAL_LAST_DB_WRITE.set(username, now);
-
-			let deltaGb = toCommit / (1024 * 1024 * 1024);
-
-			env.DB.prepare("UPDATE users SET used_gb = used_gb + ?, used_req = used_req + ? WHERE username = ?")
-				.bind(deltaGb, toCommitReq, username)
-				.run()
-				.catch(e => console.error(e))
-				.finally(() => GLOBAL_WRITE_LOCK.set(username, false));
-		}
-	}
-
-	const newHeaders = new Headers(request.headers);
-	let railwayResponse = null;
-
-	for (const backend of RAILWAY_BACKENDS) {
-		try {
-			const railwayUrl = new URL(request.url);
-			railwayUrl.hostname = backend;
-			railwayUrl.pathname = "/Ma_Ke_Vaslim";
-			railwayUrl.protocol = "https:";
-			railwayUrl.port = "443";
-
-			newHeaders.set("Host", backend);
-
-			const res = await fetch(railwayUrl.toString(), {
-				method: "GET",
-				headers: newHeaders,
-				redirect: "manual"
-			});
-
-			if (res.webSocket) {
-				railwayResponse = res;
-				break;
-			}
-		} catch (err) {
-			console.log(`Backend ${backend} failed, trying next...`);
-		}
-	}
-
-	if (!railwayResponse || !railwayResponse.webSocket) {
-		let ac = ACTIVE_CONNECTIONS_COUNT.get(username) || 1;
-		ACTIVE_CONNECTIONS_COUNT.set(username, Math.max(0, ac - 1));
-		return new Response("All Railway Backends Offline", { status: 502 });
-	}
-
-	const backendSocket = railwayResponse.webSocket;
-	const { 0: clientSocket, 1: localServerSocket } = new WebSocketPair();
-
-	backendSocket.accept();
-	localServerSocket.accept();
-
-	const createWsStream = (ws) => {
-		const readable = new ReadableStream({
-			start(controller) {
-				ws.addEventListener("message", e => controller.enqueue(e.data));
-				ws.addEventListener("close", () => controller.close());
-				ws.addEventListener("error", e => controller.error(e));
-			},
-			cancel() { ws.close(); }
-		});
-
-		const writable = new WritableStream({
-			write(chunk) {
-				if (ws.readyState === 1) ws.send(chunk);
-			},
-			close() { ws.close(); },
-			abort() { ws.close(); }
-		});
-
-		return { readable, writable };
-	};
-
-	const localStream = createWsStream(localServerSocket);
-	const remoteStream = createWsStream(backendSocket);
-
-	const createTrafficCounter = () => new TransformStream({
-		transform(chunk, controller) {
-			const bytes = chunk.byteLength || chunk.length || 0;
-			addBytes(bytes);
-			controller.enqueue(chunk);
-		}
-	});
-
-	localStream.readable
-		.pipeThrough(createTrafficCounter())
-		.pipeTo(remoteStream.writable)
-		.catch(() => {});
-
-	remoteStream.readable
-		.pipeThrough(createTrafficCounter())
-		.pipeTo(localStream.writable)
-		.catch(() => {});
-
-	let isClosed = false;
-	const closeSockets = () => {
-		if(isClosed) return;
-		isClosed = true;
-
-		try { localServerSocket.close(); } catch(e) {}
-		try { backendSocket.close(); } catch(e) {}
-
-		let ac = ACTIVE_CONNECTIONS_COUNT.get(username) || 1;
-		ac = Math.max(0, ac - 1);
-		ACTIVE_CONNECTIONS_COUNT.set(username, ac);
-
-		if (ac === 0) {
-			let remainingBytes = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
-			let remainingReqs = USER_REQ_CACHE.get(username) || 0;
-
-			if (remainingBytes > 0 || remainingReqs > 0) {
-				GLOBAL_WRITE_LOCK.set(username, true);
-				let deltaGb = remainingBytes / (1024 * 1024 * 1024);
-
-				const dbTask = env.DB.prepare("UPDATE users SET used_gb = used_gb + ?, used_req = used_req + ? WHERE username = ?")
-					.bind(deltaGb, remainingReqs, username)
-					.run()
-					.catch(e => console.error("DB Save Error:", e))
-					.finally(() => {
-						GLOBAL_WRITE_LOCK.delete(username);
-						GLOBAL_TRAFFIC_CACHE.delete(username);
-						USER_REQ_CACHE.delete(username);
-					});
-
-				if (ctx) ctx.waitUntil(dbTask);
-				else dbTask;
-			} else {
-				GLOBAL_TRAFFIC_CACHE.delete(username);
-				USER_REQ_CACHE.delete(username);
-			}
-		}
-	};
-
-	localServerSocket.addEventListener("close", closeSockets);
-	backendSocket.addEventListener("close", closeSockets);
-	localServerSocket.addEventListener("error", closeSockets);
-	backendSocket.addEventListener("error", closeSockets);
-
-	return new Response(null, {
-		status: 101,
-		webSocket: clientSocket
-	});
-}
 const COMMON_HEAD = `<script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
@@ -3066,10 +2848,10 @@ const HTML_TEMPLATES = {
         <h2 class="text-xl font-bold text-gray-900 dark:text-white">ورود به پـنـل مدیریت</h2>
         <p class="text-sm text-gray-600 dark:text-gray-400 leading-relaxed mt-2">
             برای ورود به پـنـل، لطفاً عبارت 
-            <span class="inline-block px-2 py-1 bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-zinc-800 rounded-md font-mono text-blue-500 font-bold mx-1 shadow-sm" dir="ltr">/panel</span> 
+            <span class="inline-block px-2 py-1 bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-zinc-800 rounded-md font-mono text-blue-500 font-bold mx-1 shadow-sm" dir="ltr">/mkv</span> 
             را به انتهای آدرس مرورگر خود اضافه کنید.
         </p>
-        <button onclick="window.location.href='/panel'" class="mt-4 w-full py-2.5 bg-transparent border-2 border-green-600 text-green-700 hover:bg-green-900/20 hover:text-green-800 dark:border-green-500 dark:text-green-500 dark:hover:bg-green-900/40 dark:hover:text-green-400 font-medium rounded-md text-sm transition-colors duration-200 shadow-lg font-bold">
+        <button onclick="window.location.href='/mkv'" class="mt-4 w-full py-2.5 bg-transparent border-2 border-green-600 text-green-700 hover:bg-green-900/20 hover:text-green-800 dark:border-green-500 dark:text-green-500 dark:hover:bg-green-900/40 dark:hover:text-green-400 font-medium rounded-md text-sm transition-colors duration-200 shadow-lg font-bold">
             ورود به پـنـل
         </button>
     </div>
