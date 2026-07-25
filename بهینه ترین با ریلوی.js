@@ -34,7 +34,7 @@ async function fetchWithFallback(path, options = {}, cacheTtl = 3600, ctx = null
         return cachedResponse;
     }
     const githubUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
-    const staticUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
+    const staticUrl = `https://zeus-files.surge.sh/${path}`;
     let response;
     try {
         const res = await fetch(githubUrl, options);
