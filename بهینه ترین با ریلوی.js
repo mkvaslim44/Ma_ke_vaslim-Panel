@@ -13,28 +13,44 @@ const USERS_LIST_CACHE = { data: null, lastFetch: 0 };
 const LUT_HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 let GLOBAL_REQ_COUNT = 0;
 let GLOBAL_LAST_REQ_WRITE = 0;
-const DNS_CACHE_TTL = 5 * 60 * 1000;
+const DNS_CACHE_TTL = 10 * 60 * 1000;
 const DOH_RESOLVER = "https://1.1.1.1/dns-query";
-const UPSTREAM_BUNDLE_TARGET_BYTES = 32 * 1024;
+const UPSTREAM_BUNDLE_TARGET_BYTES = 128 * 1024;
 const UPSTREAM_QUEUE_MAX_BYTES = 16 * 1024 * 1024;
 const UPSTREAM_QUEUE_MAX_ITEMS = 4096;
 const DOWNSTREAM_GRAIN_BYTES = 32 * 1024;
 const DOWNSTREAM_GRAIN_TAIL_THRESHOLD = 512;
 const DOWNSTREAM_GRAIN_SILENT_MS = 1;
 const TCP_CONCURRENCY = 4;
-const PRELOAD_RACE_DIAL = true;
+const PRELOAD_RACE_DIAL = false;
 const MY_SECRET_DOMAIN = "cloudflare.workers.dev";
-async function fetchWithFallback(path, options = {}) {
-	const githubUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
-	const staticUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
-	try {
-		const res = await fetch(githubUrl, options);
-		if (res.ok) return res;
-	} catch (e) {}
-	return await fetch(staticUrl, options);
-}
-
 let localLastAutoResetCheck = 0;
+let localLastIpRotateCheck = 0;
+async function fetchWithFallback(path, options = {}, cacheTtl = 3600, ctx = null) {
+    const cache = caches.default;
+    const cacheUrl = `https://internal.zeus/${path}`;
+    const cachedResponse = await cache.match(cacheUrl);
+    if (cachedResponse) {
+        return cachedResponse;
+    }
+    const githubUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
+    const staticUrl = `https://raw.githubusercontent.com/mkvaslim44/Ma_ke_vaslim-Panel/main/${path}`;
+    let response;
+    try {
+        const res = await fetch(githubUrl, options);
+        if (res.ok) {
+            response = res;
+        }
+    } catch (e) {}
+    if (!response) {
+        response = await fetch(staticUrl, options);
+    }
+    if (response && response.ok) {
+        const cloned = response.clone();
+        if (ctx) ctx.waitUntil(cache.put(cacheUrl, cloned));
+    }
+    return response;
+}
 async function checkAutoResets(env, ctx) {
 	const now = Date.now();
 	if (now - localLastAutoResetCheck < 3600000) return;
@@ -81,7 +97,7 @@ async function checkAutoRotates(env, ctx) {
 
 		const { results: usersToRotate } = await env.DB.prepare("SELECT * FROM users WHERE auto_rotate_ip = 1 AND ? >= (last_rotate_time + (rotate_time * 60000))").bind(now).all();
 		if (!usersToRotate || usersToRotate.length === 0) return;
-		const res = await fetchWithFallback("ips.txt");
+		const res = await fetchWithFallback("ips.txt", {}, 3600, ctx);
 		if (!res.ok) return;
 		const text = await res.text();
 		const blocks = text.split("----------");
@@ -127,7 +143,7 @@ async function checkAutoRotates(env, ctx) {
 			}
 		}
 		if (stmts.length > 0) {
-			const batchSize = 50;
+			const batchSize = 100;
 			for (let i = 0; i < stmts.length; i += batchSize) {
 				await env.DB.batch(stmts.slice(i, i + batchSize));
 			}
@@ -137,7 +153,7 @@ async function checkAutoRotates(env, ctx) {
 let cachedVipCountries = [];
 let lastVipCountriesFetch = 0;
 
-async function replaceBrokenProxy(username, env, oldProxy) {
+async function replaceBrokenProxy(username, env, oldProxy, ctx = null) {
 	try {
 		if (GLOBAL_WRITE_LOCK.get(username + "_proxy_rotate")) return;
 		GLOBAL_WRITE_LOCK.set(username + "_proxy_rotate", true);
@@ -163,8 +179,7 @@ async function replaceBrokenProxy(username, env, oldProxy) {
 		if (cachedVipCountries.length === 0 || Date.now() - lastVipCountriesFetch > 3600000) {
 			try {
 				const ghRes = await fetchWithFallback("vip-list", {
-					headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
-				});
+					headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" } }, 3600, ctx);
 				if (ghRes.ok) {
 					const files = await ghRes.json();
 					cachedVipCountries = files.filter(f => f.name.endsWith('.txt')).map(f => f.name.replace('.txt', '').toUpperCase());
@@ -193,7 +208,7 @@ async function replaceBrokenProxy(username, env, oldProxy) {
 		}
 		for (const src of sources) {
 			try {
-				const res = await fetchWithFallback(src.url);
+				const res = await fetchWithFallback(src.url, {}, 3600, ctx);
 				if (!res.ok) continue;
 				const text = await res.text();
 				const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 5);
@@ -1473,7 +1488,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
 			try {
 				serverSock.send(new Uint8Array(0));
 				if (!validUUID || !username) {
-					heartbeat = setTimeout(runHeartbeat, Math.floor(Math.random() * 5000) + 20000);
+					heartbeat = setTimeout(runHeartbeat, Math.floor(Math.random() * 5000) + 30000);
 					return;
 				}
 				const nowTime = Date.now();
@@ -1804,7 +1819,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
 									s = await connectProxy(userSocks5, addr, port, dataPayload);
 								} catch (proxyErr) {
 									if (!perIpProxy && user.auto_rotate_user_proxy === 1) {
-										const replaceTask = replaceBrokenProxy(user.username, env, userSocks5);
+										const replaceTask = replaceBrokenProxy(user.username, env, userSocks5, ctx);
 										if (ctx) ctx.waitUntil(replaceTask);
 										else replaceTask.catch(() => {});
 									}
@@ -1897,13 +1912,19 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
 	});
 	return new Response(null, { status: 101, webSocket: clientSock });
 }
+let cachedCfUsage = null;
+let cachedCfUsageTime = 0;
 async function getCfUsage(env) {
-	if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return { today: 0, total: 0 };
-	try {
-		const now = new Date();
-		const startOfDay = new Date(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()).toISOString();
-		const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-		const q = `query {
+    const now = Date.now();
+    if (cachedCfUsage && now - cachedCfUsageTime < 300000) {
+        return cachedCfUsage;
+    }
+    if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return { today: 0, total: 0 };
+    try {
+        const now = new Date();
+        const startOfDay = new Date(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()).toISOString();
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const q = `query {
       viewer {
         accounts(filter: {accountTag: "${env.CF_ACCOUNT_ID}"}) {
           today: workersInvocationsAdaptive(limit: 10, filter: {datetime_geq: "${startOfDay}"}) {
@@ -1915,19 +1936,21 @@ async function getCfUsage(env) {
         }
       }
     }`;
-		const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
-			method: "POST",
-			headers: { Authorization: "Bearer " + env.CF_API_TOKEN, "Content-Type": "application/json" },
-			body: JSON.stringify({ query: q }),
-		});
-		const j = await res.json();
-		const acc = j?.data?.viewer?.accounts?.[0];
-		const todayReqs = acc?.today?.[0]?.sum?.requests || 0;
-		const totalReqs = acc?.total?.[0]?.sum?.requests || todayReqs;
-		return { today: todayReqs, total: totalReqs };
-	} catch (e) {
-		return { today: 0, total: 0 };
-	}
+        const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+            method: "POST",
+            headers: { Authorization: "Bearer " + env.CF_API_TOKEN, "Content-Type": "application/json" },
+            body: JSON.stringify({ query: q }),
+        });
+        const j = await res.json();
+        const acc = j?.data?.viewer?.accounts?.[0];
+        const todayReqs = acc?.today?.[0]?.sum?.requests || 0;
+        const totalReqs = acc?.total?.[0]?.sum?.requests || todayReqs;
+        cachedCfUsage = { today: todayReqs, total: totalReqs };
+        cachedCfUsageTime = now;
+        return cachedCfUsage;
+    } catch (e) {
+        return { today: 0, total: 0 };
+    }
 }
 function isIPv4(value) {
 	const parts = String(value || "").split(".");
@@ -2448,45 +2471,14 @@ async function buildRaceCandidates(address, port) {
 	return ipList.map((hostname, attempt) => ({ hostname, port, attempt, resolvedFrom: address }));
 }
 async function connectDirect(address, port, initialData = null) {
-	const raceCandidates = await buildRaceCandidates(address, port);
-	const candidates = raceCandidates || Array.from({ length: TCP_CONCURRENCY }, () => ({ hostname: address, port }));
-	const openConnection = async (host, prt) => {
-		const socket = connect({ hostname: host, port: prt });
-		await Promise.race([socket.opened, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 1000))]);
-		return socket;
-	};
-	if (candidates.length === 1) {
-		const s = await openConnection(candidates[0].hostname, candidates[0].port);
-		if (initialData && initialData.byteLength > 0) {
-			const w = s.writable.getWriter();
-			await w.write(convertToUint8Array(initialData));
-			w.releaseLock();
-		}
-		return s;
-	}
-	const attempts = candidates.map((c) => openConnection(c.hostname, c.port).then((socket) => ({ socket, candidate: c })));
-	let winner = null;
-	try {
-		winner = await Promise.any(attempts);
-		if (initialData && initialData.byteLength > 0) {
-			const w = winner.socket.writable.getWriter();
-			await w.write(convertToUint8Array(initialData));
-			w.releaseLock();
-		}
-		return winner.socket;
-	} finally {
-		if (winner) {
-			for (const attempt of attempts) {
-				attempt
-					.then(({ socket }) => {
-						if (socket !== winner.socket) {
-							try { socket.close(); } catch (e) {}
-						}
-					})
-					.catch(() => {});
-			}
-		}
-	}
+    const socket = connect({ hostname: address, port: port });
+    await Promise.race([socket.opened, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))]);
+    if (initialData && initialData.byteLength > 0) {
+        const w = socket.writable.getWriter();
+        await w.write(convertToUint8Array(initialData));
+        w.releaseLock();
+    }
+    return socket;
 }
 async function forwardVlessUDP(udpChunk, webSocket, respHeader, onBytes, dnsServer = "8.8.4.4") {
     const requestData = convertToUint8Array(udpChunk);
@@ -2530,7 +2522,7 @@ function extractUUIDFromvIees(data) {
 function trackRequest(env, ctx) {
 	GLOBAL_REQ_COUNT++;
 	const now = Date.now();
-	if (now - GLOBAL_LAST_REQ_WRITE > 60000 && GLOBAL_REQ_COUNT > 0) {
+	if ((now - GLOBAL_LAST_REQ_WRITE > 180000 || GLOBAL_REQ_COUNT > 10000) && GLOBAL_REQ_COUNT > 0) {
 		GLOBAL_LAST_REQ_WRITE = now;
 		const countToSave = GLOBAL_REQ_COUNT;
 		GLOBAL_REQ_COUNT = 0;
