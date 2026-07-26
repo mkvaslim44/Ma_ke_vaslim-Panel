@@ -5478,9 +5478,9 @@ function setModalState(modalId, show) {
 					const remarkWs = flagEmoji + ' | ' + customName + ' | WS | \\u200E' + ipOrDomain + ' | \\u200E' + portStr;
 					const remarkGrpc = flagEmoji + ' | ' + customName + ' | gRPC🚀 | \\u200E' + ipOrDomain + ' | \\u200E' + portStr;
                     const proxyB64 = perIpProxy ? encodeProxyForPathUI(perIpProxy) : null;
-                    const wsPath = proxyB64 ? `/p/${proxyB64}/Ma_Ke_Vaslim` : `/Ma_Ke_Vaslim`;
+                    const wsPath = proxyB64 ? '/p/' + proxyB64 + '/Ma_Ke_Vaslim' : '/Ma_Ke_Vaslim';
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?path=' + encodeURIComponent(wsPath) + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + userFrag + '#' + encodeURIComponent(remarkWs));
-                    const grpcService = proxyB64 ? `p/${proxyB64}/Ma_Ke_Vaslim` : `Ma_Ke_Vaslim`;
+                    const grpcService = proxyB64 ? 'p/' + proxyB64 + '/Ma_Ke_Vaslim' : 'Ma_Ke_Vaslim';
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=' + encodeURIComponent(grpcService) + '&authority=' + sniDomain + '&alpn=h2,http/1.1' + userFrag + '#' + encodeURIComponent(remarkGrpc));
 				});
             });
