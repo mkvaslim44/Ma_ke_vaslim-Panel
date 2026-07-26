@@ -1287,7 +1287,10 @@ const SubscriptionService = {
 		function generateGrpcConfig(uuid, cleanIp, port, configName, fingerprint, proxyPath, extraStr) {
 			const encodedName = encodeURIComponent(configName);
 			const sniDomain = MY_SECRET_DOMAIN || host;
-			const serviceName = proxyPath ? `p/${proxyPath}/Ma_Ke_Vaslim` : `Ma_Ke_Vaslim`;
+			// For gRPC, serviceName must be simple without slashes for Cloudflare compatibility
+			// Per-IP proxy via path is not compatible with gRPC spec, so we always use Ma_Ke_Vaslim
+			// The worker will still handle per-IP proxy if present in pathname via fallback parsing, but we don't generate it to ensure ping works
+			const serviceName = `Ma_Ke_Vaslim`;
 			const params = new URLSearchParams({
 				encryption: "none",
 				security: "tls",
@@ -5480,7 +5483,7 @@ function setModalState(modalId, show) {
                     const proxyB64 = perIpProxy ? encodeProxyForPathUI(perIpProxy) : null;
                     const wsPath = proxyB64 ? '/p/' + proxyB64 + '/Ma_Ke_Vaslim' : '/Ma_Ke_Vaslim';
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?path=' + encodeURIComponent(wsPath) + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + userFrag + '#' + encodeURIComponent(remarkWs));
-                    const grpcService = proxyB64 ? 'p/' + proxyB64 + '/Ma_Ke_Vaslim' : 'Ma_Ke_Vaslim';
+                    const grpcService = 'Ma_Ke_Vaslim'; // Fixed: no slashes for gRPC compatibility, per-IP proxy ignored for gRPC to ensure ping
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=' + encodeURIComponent(grpcService) + '&authority=' + sniDomain + '&alpn=h2,http/1.1' + userFrag + '#' + encodeURIComponent(remarkGrpc));
 				});
             });
