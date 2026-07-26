@@ -75,7 +75,6 @@ async function checkAutoResets(env, ctx) {
 		await env.DB.prepare(`UPDATE users SET used_req = 0, is_active = 1, last_reset_req_time = ? WHERE auto_reset_req_days > 0 AND ? >= (last_reset_req_time + (auto_reset_req_days * 86400000))`).bind(todayUtc, todayUtc).run();
 	} catch (e) {}
 }
-let localLastIpRotateCheck = 0;
 async function checkAutoRotates(env, ctx) {
 	const now = Date.now();
 	if (now - localLastIpRotateCheck < 60000) return;
@@ -1915,8 +1914,8 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
 let cachedCfUsage = null;
 let cachedCfUsageTime = 0;
 async function getCfUsage(env) {
-    const now = Date.now();
-    if (cachedCfUsage && now - cachedCfUsageTime < 300000) {
+    const now = Date.now();  // عدد
+    if (cachedCfUsage && (now - cachedCfUsageTime) < 300000) {
         return cachedCfUsage;
     }
     if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return { today: 0, total: 0 };
@@ -1946,7 +1945,6 @@ async function getCfUsage(env) {
         const todayReqs = acc?.today?.[0]?.sum?.requests || 0;
         const totalReqs = acc?.total?.[0]?.sum?.requests || todayReqs;
         cachedCfUsage = { today: todayReqs, total: totalReqs };
-        cachedCfUsageTime = now;
         return cachedCfUsage;
     } catch (e) {
         return { today: 0, total: 0 };
