@@ -285,22 +285,20 @@ export default {
 			}
 		}
 
-		// gRPC handling - must be before WebSocket, as gRPC is POST with application/grpc content-type
-		if (Router.isGrpcRequest(request)) {
+		// XHTTP handling - must be before WS, supports stream-one (single POST) and packet-up/stream-up (GET+POST with UUID)
+		if (Router.isXHTTPRequest(request, url)) {
 			let perIpProxy = extractPerIpProxyFromPath(url.pathname);
 			if (!perIpProxy) {
-				const serviceName = url.searchParams.get("serviceName") || "";
-				if (serviceName.includes("/p/") || serviceName.startsWith("p/")) {
-					try {
-						const m = serviceName.match(/p\/([^\/]+)\/Ma_Ke_Vaslim/);
-						if (m && m[1]) {
-							let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
-							while (b64.length % 4) b64 += '=';
-							perIpProxy = decodeURIComponent(atob(b64));
-						}
-					} catch (e) {}
+				const parts = url.pathname.split("/").filter(p => p.length > 0);
+				if (parts.length >= 2 && parts[0] === "p") {
+					perIpProxy = extractPerIpProxyFromPath(url.pathname);
 				}
 			}
+			return await Router.handleXHTTP(request, env, ctx, perIpProxy);
+		}
+
+		if (Router.isGrpcRequest(request)) {
+			let perIpProxy = extractPerIpProxyFromPath(url.pathname);
 			return await Router.handleGrpc(request, env, ctx, perIpProxy);
 		}
 
@@ -319,18 +317,6 @@ export default {
 
 		if (Router.isWebSocketUpgrade(request)) {
 			return await Router.handleWebSocket(request, env, ctx);
-		}
-		if ((url.pathname.includes("Ma_Ke_Vaslim") || url.pathname.includes("grpc")) && request.method === "POST") {
-			const ct = request.headers.get("content-type") || "";
-			if (ct === "" || ct.includes("grpc") || ct.includes("octet-stream") || request.headers.get("grpc-timeout")) {
-				let perIpProxy = extractPerIpProxyFromPath(url.pathname);
-				const hasGrpcHint = url.searchParams.get("type") === "grpc" || url.pathname.includes("grpc") || ct.includes("grpc");
-				if (hasGrpcHint || url.pathname.includes("Ma_Ke_Vaslim")) {
-					try {
-						return await Router.handleGrpc(request, env, ctx, perIpProxy);
-					} catch (e) {}
-				}
-			}
 		}
 		if (Router.isSubscriptionPath(url.pathname)) {
 			return await Router.handleSubscription(url, env);
@@ -383,6 +369,21 @@ function extractPerIpProxyFromPath(pathname) {
 	}
 }
 
+const XHTTP_SESSIONS = new Map();
+const XHTTP_SESSION_TTL = 30 * 1000;
+
+function cleanupXHTTPSessions() {
+	const now = Date.now();
+	for (const [id, sess] of XHTTP_SESSIONS.entries()) {
+		if (now - sess.lastActive > XHTTP_SESSION_TTL) {
+			try { sess.controller?.close(); } catch {}
+			try { sess.remoteSocket?.close(); } catch {}
+			XHTTP_SESSIONS.delete(id);
+		}
+	}
+}
+setInterval(cleanupXHTTPSessions, 10000);
+
 const Router = {
 	isWebSocketUpgrade(request) {
 		const upgradeHeader = (request.headers.get("Upgrade") || "").toLowerCase();
@@ -390,7 +391,14 @@ const Router = {
 	},
 	isGrpcRequest(request) {
 		const ct = (request.headers.get("content-type") || "").toLowerCase();
-		return ct.includes("application/grpc") || ct.includes("grpc");
+		return ct.includes("application/grpc");
+	},
+	isXHTTPRequest(request, url) {
+		if (this.isWebSocketUpgrade(request)) return false;
+		if (this.isGrpcRequest(request)) return false;
+		if (!url.pathname.includes("Ma_Ke_Vaslim")) return false;
+		const method = request.method;
+		return method === "POST" || method === "GET";
 	},
 	isSubscriptionPath(pathname) {
 		return pathname.startsWith("/sub/") || pathname.startsWith("/feed/");
@@ -410,6 +418,21 @@ const Router = {
 			return new Response("Internal Server Error", { status: 500 });
 		}
 	},
+	async handleXHTTP(request, env, ctx, perIpProxy = null) {
+		try {
+			let proxyIP = "proxyip.cmliussss.net";
+			try {
+				const proxyRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'proxy_ip'").first();
+				if (proxyRow && proxyRow.value) {
+					proxyIP = proxyRow.value;
+				}
+			} catch (e) {}
+			const mockStoredData = { proxy_ip: proxyIP, per_ip_proxy: perIpProxy };
+			return handleXHTTPHandler(env, mockStoredData, ctx, request);
+		} catch (e) {
+			return new Response("XHTTP Error: " + e.message, { status: 500 });
+		}
+	},
 	async handleGrpc(_request, env, ctx, perIpProxy = null) {
 		try {
 			let proxyIP = "proxyip.cmliussss.net";
@@ -422,7 +445,7 @@ const Router = {
 			const mockStoredData = { proxy_ip: proxyIP, per_ip_proxy: perIpProxy };
 			return handleVLESSGrpc(env, mockStoredData, ctx, _request);
 		} catch (e) {
-			return new Response("gRPC Internal Error: " + e.message, { status: 500, headers: { "content-type": "application/grpc", "grpc-status": "13" } });
+			return new Response("gRPC Error: " + e.message, { status: 500, headers: { "content-type": "application/grpc", "grpc-status": "13" } });
 		}
 	},
 		async handleSubscription(url, env) {
@@ -1284,12 +1307,30 @@ const SubscriptionService = {
 			return link;
 		}
 
+		function generateXHTTPConfig(uuid, cleanIp, port, configName, fingerprint, proxyPath, extraStr, mode = "stream-one") {
+			const encodedName = encodeURIComponent(configName);
+			const sniDomain = MY_SECRET_DOMAIN || host;
+			const xhttpPath = proxyPath ? `/p/${proxyPath}/Ma_Ke_Vaslim` : `/Ma_Ke_Vaslim`;
+			const params = new URLSearchParams({
+				encryption: "none",
+				security: "tls",
+				sni: sniDomain,
+				type: "xhttp",
+				path: xhttpPath,
+				host: sniDomain,
+				fp: fingerprint,
+				mode: mode,
+				alpn: "h2,http/1.1"
+			});
+			let link = `vless://${uuid}@${cleanIp}:${port}?${params.toString()}`;
+			if (extraStr) link += `&extraParams=${extraStr}`;
+			link += `#${encodedName}`;
+			return link;
+		}
+
 		function generateGrpcConfig(uuid, cleanIp, port, configName, fingerprint, proxyPath, extraStr) {
 			const encodedName = encodeURIComponent(configName);
 			const sniDomain = MY_SECRET_DOMAIN || host;
-			// For gRPC, serviceName must be simple without slashes for Cloudflare compatibility
-			// Per-IP proxy via path is not compatible with gRPC spec, so we always use Ma_Ke_Vaslim
-			// The worker will still handle per-IP proxy if present in pathname via fallback parsing, but we don't generate it to ensure ping works
 			const serviceName = `Ma_Ke_Vaslim`;
 			const params = new URLSearchParams({
 				encryption: "none",
@@ -1339,6 +1380,7 @@ const SubscriptionService = {
 			if (!ipOrDomain || !port) return;
 
 			const remarkBase = `${customName} ${info}`;
+			const remarkXHTTPBase = `${customName} [XHTTP🚀] ${info}`;
 			const remarkGrpcBase = `${customName} [gRPC] ${info}`;
 			const lowerName = (customName || "").toLowerCase();
 
@@ -1347,6 +1389,11 @@ const SubscriptionService = {
 				"mode": "auto",
 				"xPaddingBytes": "100-1000",
 				"xmux": { "maxConcurrency": "4-8" }
+			};
+			let extraParamsXHTTPObj = {
+				"mode": "stream-one",
+				"xPaddingBytes": "100-1000",
+				"xmux": { "maxConcurrency": "8-16" }
 			};
 			let extraParamsGrpcObj = {
 				"mode": "gun",
@@ -1358,6 +1405,8 @@ const SubscriptionService = {
 				currentFragment = "&fragment=10-20,10-20";
 				extraParamsObj.xPaddingBytes = "100-500";
 				extraParamsObj.xmux.maxConcurrency = "4-8";
+				extraParamsXHTTPObj.xPaddingBytes = "100-500";
+				extraParamsXHTTPObj.xmux.maxConcurrency = "8-16";
 				extraParamsGrpcObj.xPaddingBytes = "100-500";
 				extraParamsGrpcObj.xmux.maxConcurrency = "8-16";
 			}
@@ -1365,20 +1414,25 @@ const SubscriptionService = {
 				currentFragment = "&fragment=100-200,10-20";
 				extraParamsObj.xPaddingBytes = "500-1500";
 				extraParamsObj.xmux.maxConcurrency = "4-8";
+				extraParamsXHTTPObj.xPaddingBytes = "500-1500";
+				extraParamsXHTTPObj.xmux.maxConcurrency = "8-16";
 				extraParamsGrpcObj.xPaddingBytes = "500-1500";
 				extraParamsGrpcObj.xmux.maxConcurrency = "8-16";
 			}
 			else if (lowerName.includes("gaming") || lowerName.includes("گیم")) {
 				currentFragment = "";
 				extraParamsObj.xmux.maxConcurrency = "1-4";
+				extraParamsXHTTPObj.xmux.maxConcurrency = "4-8";
 				extraParamsGrpcObj.xmux.maxConcurrency = "4-8";
 			}
 
 			const extraParams = encodeURIComponent(JSON.stringify(extraParamsObj));
+			const extraParamsXHTTP = encodeURIComponent(JSON.stringify(extraParamsXHTTPObj));
 			const extraParamsGrpc = encodeURIComponent(JSON.stringify(extraParamsGrpcObj));
 
 			const proxyB64 = encodeProxyForPath(perIpProxy || user.user_socks5 || null);
 
+			// WS config
 			if (proxyB64) {
 				const proxyRemark = `${customName}🔒 ${info}`;
 				const proxyLink = generateConfig(user.uuid, ipOrDomain, port, proxyRemark, fp, currentFragment, extraParams, proxyB64);
@@ -1388,6 +1442,17 @@ const SubscriptionService = {
 				links.push(directLink);
 			}
 
+			// XHTTP config - BEST for Cloudflare Workers, stream-one mode
+			if (proxyB64) {
+				const proxyRemarkXHTTP = `${customName}🔒 [XHTTP🚀] ${info}`;
+				const proxyLinkXHTTP = generateXHTTPConfig(user.uuid, ipOrDomain, port, proxyRemarkXHTTP, fp, proxyB64, extraParamsXHTTP, "stream-one");
+				links.push(proxyLinkXHTTP);
+			} else {
+				const directLinkXHTTP = generateXHTTPConfig(user.uuid, ipOrDomain, port, remarkXHTTPBase + " 🚀", fp, null, extraParamsXHTTP, "stream-one");
+				links.push(directLinkXHTTP);
+			}
+
+			// gRPC config kept for backward compat
 			if (proxyB64) {
 				const proxyRemarkGrpc = `${customName}🔒 [gRPC🚀] ${info}`;
 				const proxyLinkGrpc = generateGrpcConfig(user.uuid, ipOrDomain, port, proxyRemarkGrpc, fp, proxyB64, extraParamsGrpc);
@@ -1460,6 +1525,444 @@ async function flushExpiredTraffic(env) {
 		}
 	}
 }
+// XHTTP (SplitHTTP) Handler - Supports stream-one (single POST) and packet-up/stream-up (GET+POST with UUID)
+async function handleXHTTPHandler(env, storedData = null, ctx = null, request = null) {
+	const clientIP = request ? request.headers.get("CF-Connecting-IP") || "unknown" : "unknown";
+	let username = null;
+	let validUUID = null;
+	let targetDns = "8.8.4.4";
+	let targetDoh = "https://cloudflare-dns.com/dns-query";
+	let uncountedBytes = 0;
+	const proxyIP = storedData?.proxy_ip || "";
+
+	function addBytes(bytes) {
+		if (bytes <= 0) return;
+		if (!username) {
+			uncountedBytes += bytes;
+			return;
+		}
+		if (uncountedBytes > 0) {
+			bytes += uncountedBytes;
+			uncountedBytes = 0;
+		}
+		let current = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
+		GLOBAL_TRAFFIC_CACHE.set(username, current + bytes);
+		GLOBAL_LAST_ACTIVE_WRITE.set(username, Date.now());
+		if (GLOBAL_WRITE_LOCK.get(username)) return;
+		let lastDbWrite = GLOBAL_LAST_DB_WRITE.get(username) || 0;
+		let now = Date.now();
+		let thresholdBytes = 50 * 1024 * 1024;
+		if ((current >= thresholdBytes && now - lastDbWrite > 10000) || (current > 0 && now - lastDbWrite > 60000)) {
+			GLOBAL_WRITE_LOCK.set(username, true);
+			let toCommit = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
+			let toCommitReq = USER_REQ_CACHE.get(username) || 0;
+			if (toCommit <= 0 && toCommitReq <= 0) {
+				GLOBAL_WRITE_LOCK.set(username, false);
+				return;
+			}
+			GLOBAL_TRAFFIC_CACHE.set(username, (GLOBAL_TRAFFIC_CACHE.get(username) || 0) - toCommit);
+			USER_REQ_CACHE.set(username, (USER_REQ_CACHE.get(username) || 0) - toCommitReq);
+			GLOBAL_LAST_DB_WRITE.set(username, now);
+			let deltaGb = toCommit / (1024 * 1024 * 1024);
+			let writeTask = async () => {
+				try {
+					await env.DB.prepare("UPDATE users SET used_gb = used_gb + ?, lifetime_used_gb = lifetime_used_gb + ?, used_req = used_req + ? WHERE username = ?").bind(deltaGb, deltaGb, toCommitReq, username).run();
+				} catch (e) {
+					GLOBAL_TRAFFIC_CACHE.set(username, (GLOBAL_TRAFFIC_CACHE.get(username) || 0) + toCommit);
+					USER_REQ_CACHE.set(username, (USER_REQ_CACHE.get(username) || 0) + toCommitReq);
+				} finally {
+					GLOBAL_WRITE_LOCK.set(username, false);
+				}
+			};
+			if (ctx) ctx.waitUntil(writeTask());
+			else writeTask();
+		}
+	}
+
+	let isOfflineSet = false;
+	let hasCountedAsActive = false;
+	const setOffline = () => {
+		if (isOfflineSet) return;
+		isOfflineSet = true;
+		const uname = username;
+		if (!uname) return;
+		if (clientIP && clientIP !== "unknown" && validUUID) {
+			const removeIpTask = async () => {
+				try {
+					const user = await env.DB.prepare("SELECT active_ips FROM users WHERE uuid = ?").bind(validUUID).first();
+					if (user) {
+						let activeIps = JSON.parse(user.active_ips || "{}");
+						if (activeIps[clientIP]) {
+							if (typeof activeIps[clientIP] === "object") {
+								activeIps[clientIP].count = (activeIps[clientIP].count || 1) - 1;
+								if (activeIps[clientIP].count <= 0) delete activeIps[clientIP];
+							} else delete activeIps[clientIP];
+						}
+						await env.DB.prepare("UPDATE users SET active_ips = ? WHERE uuid = ?").bind(JSON.stringify(activeIps), validUUID).run();
+					}
+				} catch (e) {}
+			};
+			if (ctx) ctx.waitUntil(removeIpTask());
+			else removeIpTask();
+		}
+		let activeCount = ACTIVE_CONNECTIONS_COUNT.get(uname) || 0;
+		if (hasCountedAsActive) activeCount = Math.max(0, activeCount - 1);
+		if (activeCount <= 0) {
+			ACTIVE_CONNECTIONS_COUNT.delete(uname);
+			let cachedBytes = GLOBAL_TRAFFIC_CACHE.get(uname) || 0;
+			let cachedReqs = USER_REQ_CACHE.get(uname) || 0;
+			if ((cachedBytes > 0 || cachedReqs > 0) && !GLOBAL_WRITE_LOCK.get(uname)) {
+				GLOBAL_WRITE_LOCK.set(uname, true);
+				GLOBAL_TRAFFIC_CACHE.set(uname, (GLOBAL_TRAFFIC_CACHE.get(uname) || 0) - cachedBytes);
+				USER_REQ_CACHE.set(uname, (USER_REQ_CACHE.get(uname) || 0) - cachedReqs);
+				const deltaGb = cachedBytes / (1024 * 1024 * 1024);
+				const writeTask = async () => {
+					try {
+						await env.DB.prepare("UPDATE users SET used_gb = used_gb + ?, lifetime_used_gb = lifetime_used_gb + ?, used_req = used_req + ? WHERE username = ?").bind(deltaGb, deltaGb, cachedReqs, uname).run();
+					} catch (e) {
+						GLOBAL_TRAFFIC_CACHE.set(uname, (GLOBAL_TRAFFIC_CACHE.get(uname) || 0) + cachedBytes);
+						USER_REQ_CACHE.set(uname, (USER_REQ_CACHE.get(uname) || 0) + cachedReqs);
+					} finally {
+						GLOBAL_WRITE_LOCK.delete(uname);
+						GLOBAL_LAST_ACTIVE_WRITE.delete(uname);
+					}
+				};
+				if (ctx) ctx.waitUntil(writeTask());
+				else writeTask();
+			} else GLOBAL_LAST_ACTIVE_WRITE.delete(uname);
+		} else ACTIVE_CONNECTIONS_COUNT.set(uname, activeCount);
+	};
+
+	// XHTTP Session handling for packet-up/stream-up (GET download)
+	const url = new URL(request.url);
+	const pathname = url.pathname;
+	const method = request.method;
+
+	// Check if this is a download GET with session UUID: /Ma_Ke_Vaslim/<uuid> or /p/<b64>/Ma_Ke_Vaslim/<uuid>
+	if (method === "GET") {
+		const parts = pathname.split("/").filter(p => p.length > 0);
+		let sessionId = null;
+		if (parts.length >= 2) {
+			if (parts[0] === "Ma_Ke_Vaslim" && parts.length >= 2) sessionId = parts[1];
+			else if (parts[0] === "p" && parts.length >= 4 && parts[2] === "Ma_Ke_Vaslim") sessionId = parts[3];
+		}
+		if (sessionId && XHTTP_SESSIONS.has(sessionId)) {
+			const sess = XHTTP_SESSIONS.get(sessionId);
+			sess.lastActive = Date.now();
+			if (sess.downloadReadable) {
+				return new Response(sess.downloadReadable, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/event-stream",
+						"Cache-Control": "no-store",
+						"X-Accel-Buffering": "no",
+						"Access-Control-Allow-Origin": "*",
+						"Access-Control-Allow-Methods": "GET, POST",
+						"Pragma": "no-cache"
+					}
+				});
+			}
+		}
+		return new Response("XHTTP GET requires valid session", { status: 404 });
+	}
+
+	// For POST: stream-one or packet-up upload
+	let sessionId = null;
+	let seq = null;
+	let isPacketUp = false;
+	const parts = pathname.split("/").filter(p => p.length > 0);
+	if (parts.length >= 3 && parts[0] === "Ma_Ke_Vaslim") {
+		if (parts.length >= 3) {
+			sessionId = parts[1];
+			seq = parseInt(parts[2]) || 0;
+			isPacketUp = true;
+		}
+	} else if (parts.length >= 5 && parts[0] === "p" && parts[2] === "Ma_Ke_Vaslim") {
+		if (parts.length >= 5) {
+			sessionId = parts[3];
+			seq = parseInt(parts[4]) || 0;
+			isPacketUp = true;
+		}
+	} else {
+		isPacketUp = false;
+	}
+
+	// For stream-one, handle directly
+	if (!isPacketUp) {
+		const { readable: responseReadable, writable: responseWritable } = new TransformStream();
+		const responseWriter = responseWritable.getWriter();
+
+		let remoteSocket = null;
+		/** @type {any} */ let remoteWriter = null;
+		let chunkBuffer = new Uint8Array(0);
+		let isHeaderParsed = false;
+
+		const xhttpTask = (async () => {
+			try {
+				if (!request.body) {
+					try { await responseWriter.close(); } catch {}
+					return;
+				}
+				const reader = request.body.getReader();
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					if (!value || value.byteLength === 0) continue;
+					await addBytes(value.byteLength);
+					if (!isHeaderParsed) {
+						chunkBuffer = concatBytes(chunkBuffer, value);
+						if (chunkBuffer.byteLength < 24) continue;
+						let optLen = chunkBuffer[17];
+						let requiredLen = 18 + optLen + 4;
+						if (chunkBuffer.byteLength < requiredLen) continue;
+						let addrType = chunkBuffer[18 + optLen + 3];
+						if (addrType === 1) requiredLen += 4;
+						else if (addrType === 2) {
+							requiredLen += 1;
+							if (chunkBuffer.byteLength < requiredLen) continue;
+							requiredLen += chunkBuffer[18 + optLen + 4];
+						} else if (addrType === 3) requiredLen += 16;
+						if (chunkBuffer.byteLength < requiredLen) continue;
+
+						let reqUUID = extractUUIDFromvIees(chunkBuffer);
+						if (!reqUUID) {
+							try { await responseWriter.close(); } catch {}
+							setOffline();
+							return;
+						}
+						let user = null;
+						try { user = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(reqUUID).first(); } catch (e) {}
+						if (!user) {
+							try { await responseWriter.close(); } catch {}
+							return;
+						}
+						username = user.username;
+						validUUID = reqUUID;
+
+						if (user.is_active === 0) { try { await responseWriter.close(); } catch {} return; }
+						if (user.limit_gb && user.used_gb >= user.limit_gb) { try { await responseWriter.close(); } catch {} return; }
+						if (user.limit_req && user.used_req + (USER_REQ_CACHE.get(username) || 0) > user.limit_req) { try { await responseWriter.close(); } catch {} return; }
+						if (user.expiry_days && user.created_at) {
+							const created = new Date(user.created_at);
+							const expiryDate = new Date(created.getTime() + user.expiry_days * 86400000);
+							if (new Date() > expiryDate) {
+								try { await env.DB.prepare("UPDATE users SET is_active = 0, last_active = 0 WHERE uuid = ?").bind(reqUUID).run(); } catch (e) {}
+								try { await responseWriter.close(); } catch {}
+								return;
+							}
+						}
+
+						if (user.block_porn === 1 && user.block_ads === 1) {
+							targetDns = "94.140.14.15";
+							targetDoh = "https://family.adguard-dns.com/dns-query";
+						} else if (user.block_porn === 1) {
+							targetDns = "1.1.1.3";
+							targetDoh = "https://family.cloudflare-dns.com/dns-query";
+						} else if (user.block_ads === 1) {
+							targetDns = "94.140.14.14";
+							targetDoh = "https://dns.adguard-dns.com/dns-query";
+						}
+
+						if (clientIP && clientIP !== "unknown") {
+							let activeIps = {};
+							try { activeIps = JSON.parse(user.active_ips || "{}"); } catch (e) {}
+							const now = Date.now();
+							for (const [ip, data] of Object.entries(activeIps)) {
+								const lastSeen = data && typeof data === "object" ? data.timestamp : data;
+								if (now - lastSeen > 20000) delete activeIps[ip];
+							}
+							let isNewIp = false;
+							if (!activeIps[clientIP]) {
+								const sorted = Object.keys(activeIps);
+								if (user.ip_limit && user.ip_limit > 0 && sorted.length >= user.ip_limit) {
+									try { await responseWriter.close(); } catch {}
+									return;
+								}
+								activeIps[clientIP] = { timestamp: now, count: 1 };
+								isNewIp = true;
+							} else {
+								if (typeof activeIps[clientIP] === "object") {
+									activeIps[clientIP].timestamp = now;
+									activeIps[clientIP].count = (activeIps[clientIP].count || 0) + 1;
+								} else activeIps[clientIP] = { timestamp: now, count: 1 };
+							}
+							const lastWrite = GLOBAL_LAST_ACTIVE_WRITE.get(username) || 0;
+							if (isNewIp || (now - lastWrite > 30000)) {
+								GLOBAL_LAST_ACTIVE_WRITE.set(username, now);
+								const updateTask = async () => {
+									try { await env.DB.prepare("UPDATE users SET active_ips = ?, last_active = ? WHERE uuid = ?").bind(JSON.stringify(activeIps), now, reqUUID).run(); } catch (e) {}
+								};
+								if (ctx) ctx.waitUntil(updateTask());
+								else updateTask();
+							}
+						}
+
+						let activeCount = ACTIVE_CONNECTIONS_COUNT.get(username) || 0;
+						ACTIVE_CONNECTIONS_COUNT.set(username, activeCount + 1);
+						hasCountedAsActive = true;
+						if (activeCount === 0) {
+							const setOnlineTask = async () => {
+								try { const now = Date.now(); GLOBAL_LAST_ACTIVE_WRITE.set(username, now); await env.DB.prepare("UPDATE users SET last_active = ? WHERE username = ?").bind(now, username).run(); } catch (e) {}
+							};
+							if (ctx) ctx.waitUntil(setOnlineTask());
+							else setOnlineTask();
+						}
+						if (!GLOBAL_TRAFFIC_CACHE.has(username)) GLOBAL_TRAFFIC_CACHE.set(username, 0);
+						let currentReqs = USER_REQ_CACHE.get(username) || 0;
+						USER_REQ_CACHE.set(username, currentReqs + 1);
+
+						try {
+							let offset = 17;
+							const optLen = chunkBuffer[offset++];
+							offset += optLen;
+							const cmd = chunkBuffer[offset++];
+							const port = (chunkBuffer[offset++] << 8) | chunkBuffer[offset++];
+							const addrType = chunkBuffer[offset++];
+							let addr = "";
+							if (addrType === 1) {
+								addr = `${chunkBuffer[offset++]}.${chunkBuffer[offset++]}.${chunkBuffer[offset++]}.${chunkBuffer[offset++]}`;
+							} else if (addrType === 2) {
+								const domainLen = chunkBuffer[offset++];
+								addr = GLOBAL_DECODER.decode(chunkBuffer.slice(offset, offset + domainLen));
+								offset += domainLen;
+							} else if (addrType === 3) {
+								const v6 = [];
+								for (let i = 0; i < 8; i++) v6.push(((chunkBuffer[offset++] << 8) | chunkBuffer[offset++]).toString(16));
+								addr = v6.join(":");
+							}
+							const rawData = chunkBuffer.slice(offset);
+							const respHeader = new Uint8Array([chunkBuffer[0], 0]);
+
+							if ((user.block_ads === 1 || user.block_porn === 1) && addrType === 2 && port !== 53) {
+								try {
+									const dnsCheck = await dohQuery(addr, "A", targetDoh);
+									const isBlocked = dnsCheck.some(r => r.data === "0.0.0.0" || r.data === "::" || r.data === "176.103.130.130");
+									if (isBlocked) { try { await responseWriter.close(); } catch {} return; }
+									const rec = dnsCheck.find(r => r.type === 1 || r.type === 28);
+									if (rec && rec.data) addr = rec.data;
+								} catch (e) {}
+							}
+
+							if (cmd === 2) {
+								if (port === 53) {
+									try {
+										const tcpSocket = connect({ hostname: targetDns, port: 53 });
+										const w = tcpSocket.writable.getWriter();
+										await w.write(rawData);
+										w.releaseLock();
+										const r = await tcpSocket.readable.getReader().read();
+										if (r.value) {
+											await addBytes(r.value.byteLength);
+											const merged = concatBytes(respHeader, r.value);
+											await responseWriter.write(merged);
+										}
+										tcpSocket.close();
+									} catch (e) {}
+									try { await responseWriter.close(); } catch {}
+									return;
+								} else {
+									try { await responseWriter.close(); } catch {}
+									return;
+								}
+							}
+
+							if (port === 25 || port === 22 || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.|::1|fd[0-9a-f]{2}:|fe80:)/i.test(addr)) {
+								try { await responseWriter.close(); } catch {}
+								return;
+							}
+
+							const connectTCP = async (dataPayload = null, useFallback = true) => {
+								let s = null;
+								const perIpProxy = storedData?.per_ip_proxy || "";
+								const userSocks5 = perIpProxy || user?.user_socks5 || "";
+								if (userSocks5) {
+									try { s = await connectProxy(userSocks5, addr, port, dataPayload); }
+									catch (proxyErr) {
+										if (!perIpProxy && user.auto_rotate_user_proxy === 1) {
+											const replaceTask = replaceBrokenProxy(user.username, env, userSocks5, ctx);
+											if (ctx) ctx.waitUntil(replaceTask); else replaceTask.catch(()=>{});
+										}
+										if (useFallback && proxyIP && !perIpProxy) s = await connectDirect(proxyIP, port, dataPayload);
+										else throw proxyErr;
+									}
+								} else {
+									try { s = await connectDirect(addr, port, dataPayload); }
+									catch (err) {
+										if (useFallback && proxyIP) s = await connectDirect(proxyIP, port, dataPayload);
+										else throw err;
+									}
+								}
+								remoteSocket = s;
+								remoteWriter = s.writable.getWriter();
+								s.closed.catch(()=>{}).finally(()=>{ try { responseWriter.close(); } catch {} setOffline(); });
+								(async () => {
+									try {
+										const readerRemote = s.readable.getReader();
+										let first = true;
+										while (true) {
+											const { done, value } = await readerRemote.read();
+											if (done) break;
+											if (!value || value.byteLength === 0) continue;
+											await addBytes(value.byteLength);
+											let toSend;
+											if (first) {
+												toSend = concatBytes(respHeader, value);
+												first = false;
+											} else toSend = value;
+											await responseWriter.write(toSend);
+										}
+									} catch (e) {}
+									try { await responseWriter.close(); } catch {}
+									setOffline();
+								})();
+							};
+							await connectTCP(rawData, true);
+							isHeaderParsed = true;
+							const remaining = chunkBuffer.slice(requiredLen);
+							if (remaining.byteLength > 0) {
+								chunkBuffer = remaining;
+							} else {
+								chunkBuffer = new Uint8Array(0);
+							}
+						} catch (e) {
+							try { await responseWriter.close(); } catch {}
+							setOffline();
+							return;
+						}
+					} else {
+						if (remoteWriter) {
+							try { await remoteWriter.write(value); } catch (e) { try { await responseWriter.close(); } catch {} return; }
+						} else {
+							chunkBuffer = concatBytes(chunkBuffer, value);
+						}
+					}
+				}
+			}
+		} catch (e) {
+			try { await responseWriter.close(); } catch {}
+			setOffline();
+		}
+	})();
+
+	if (ctx) ctx.waitUntil(xhttpTask);
+	else xhttpTask.catch(()=>{});
+
+	return new Response(responseReadable, {
+		status: 200,
+		headers: {
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-store",
+			"X-Accel-Buffering": "no",
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST",
+			"Access-Control-Allow-Headers": "*",
+			"Pragma": "no-cache",
+			"X-Padding": "X".repeat(Math.floor(Math.random()*900)+100)
+		}
+	});
+}
+
+// gRPC handler kept for backward compatibility
 async function handleVLESSGrpc(env, storedData = null, ctx = null, request = null) {
 	const clientIP = request ? request.headers.get("CF-Connecting-IP") || "unknown" : "unknown";
 	let username = null;
@@ -1588,11 +2091,9 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 	const grpcTask = (async () => {
 		try {
 			if (!request.body) {
-				try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+				try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+				try { await responseWriter.close(); } catch {}
+				return;
 			}
 			const reader = request.body.getReader();
 			while (true) {
@@ -1605,6 +2106,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 					const dv = new DataView(currentGrpcBuffer.buffer, currentGrpcBuffer.byteOffset, currentGrpcBuffer.byteLength);
 					const msgLen = dv.getUint32(1, false);
 					if (msgLen > 10 * 1024 * 1024) {
+						try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
 						try { await responseWriter.close(); } catch {}
 						setOffline();
 						return;
@@ -1616,38 +2118,31 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 					if (!isHeaderParsed) {
 						let reqUUID = extractUUIDFromvIees(payload);
 						if (!reqUUID) {
-							try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
+							try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+							try { await responseWriter.close(); } catch {}
 							setOffline();
 							return;
 						}
 						let user = null;
 						try { user = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(reqUUID).first(); } catch (e) {}
 						if (!user) {
-							try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
+							try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+							try { await responseWriter.close(); } catch {}
 							return;
 						}
 						username = user.username;
 						validUUID = reqUUID;
 
-						if (user.is_active === 0) { try { await responseWriter.close(); } catch {} return; }
-						if (user.limit_gb && user.used_gb >= user.limit_gb) { try { await responseWriter.close(); } catch {} return; }
-						if (user.limit_req && user.used_req + (USER_REQ_CACHE.get(username) || 0) > user.limit_req) { try { await responseWriter.close(); } catch {} return; }
+						if (user.is_active === 0) { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {} return; }
+						if (user.limit_gb && user.used_gb >= user.limit_gb) { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {} return; }
+						if (user.limit_req && user.used_req + (USER_REQ_CACHE.get(username) || 0) > user.limit_req) { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {} return; }
 						if (user.expiry_days && user.created_at) {
 							const created = new Date(user.created_at);
 							const expiryDate = new Date(created.getTime() + user.expiry_days * 86400000);
 							if (new Date() > expiryDate) {
 								try { await env.DB.prepare("UPDATE users SET is_active = 0, last_active = 0 WHERE uuid = ?").bind(reqUUID).run(); } catch (e) {}
-								try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
+								return;
 							}
 						}
 
@@ -1674,11 +2169,8 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 							if (!activeIps[clientIP]) {
 								const sorted = Object.keys(activeIps);
 								if (user.ip_limit && user.ip_limit > 0 && sorted.length >= user.ip_limit) {
-									try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+									try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
+									return;
 								}
 								activeIps[clientIP] = { timestamp: now, count: 1 };
 								isNewIp = true;
@@ -1739,7 +2231,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 								try {
 									const dnsCheck = await dohQuery(addr, "A", targetDoh);
 									const isBlocked = dnsCheck.some(r => r.data === "0.0.0.0" || r.data === "::" || r.data === "176.103.130.130");
-									if (isBlocked) { try { await responseWriter.close(); } catch {} return; }
+									if (isBlocked) { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {} return; }
 									const rec = dnsCheck.find(r => r.type === 1 || r.type === 28);
 									if (rec && rec.data) addr = rec.data;
 								} catch (e) {}
@@ -1762,25 +2254,20 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 										tcpSocket.close();
 									} catch (e) {}
 									try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+										const _ef = createGrpcFrame(new Uint8Array(0));
+										await responseWriter.write(_ef);
+									} catch {}
+									try { await responseWriter.close(); } catch {}
+									return;
 								} else {
-									try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+									try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
+									return;
 								}
 							}
 
 							if (port === 25 || port === 22 || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.|::1|fd[0-9a-f]{2}:|fe80:)/i.test(addr)) {
-								try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
-							return;
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
+								return;
 							}
 
 							const connectTCP = async (dataPayload = null, useFallback = true) => {
@@ -1825,6 +2312,10 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 											await responseWriter.write(frame);
 										}
 									} catch (e) {}
+									try {
+										const _ef = createGrpcFrame(new Uint8Array(0));
+										await responseWriter.write(_ef);
+									} catch {}
 									try { await responseWriter.close(); } catch {}
 									setOffline();
 								})();
@@ -1832,22 +2323,19 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 							await connectTCP(rawData, true);
 							isHeaderParsed = true;
 						} catch (e) {
-							try {
-								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
-								await responseWriter.close();
-							} catch {}
+							try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
 							setOffline();
 							return;
 						}
 					} else {
 						if (remoteWriter) {
-							try { /* @ts-ignore - remoteWriter is WritableStreamDefaultWriter */ /* @ts-ignore */ await remoteWriter.write(payload); } catch (e) { try { await responseWriter.close(); } catch {} return; }
+							try { /* @ts-ignore */ await remoteWriter.write(payload); } catch (e) { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {} return; }
 						}
 					}
 				}
 			}
 		} catch (e) {
-			try { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {} await responseWriter.close(); } catch {}
+			try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); await responseWriter.close(); } catch {}
 			setOffline();
 		}
 	})();
@@ -1870,6 +2358,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 }
 
 async function handleVLESS(env, storedData = null, ctx = null, request = null) {
+
 	const clientIP = request ? request.headers.get("CF-Connecting-IP") || "unknown" : "unknown";
 	const socketPair = new WebSocketPair();
 	const [clientSock, serverSock] = Object.values(socketPair);
@@ -3602,7 +4091,7 @@ const HTML_TEMPLATES = {
             <div class="flex flex-row flex-wrap justify-center items-center gap-3 w-full md:w-auto">
                 <h1 class="text-lg font-bold flex items-center gap-2" dir="ltr">
                     Ma Ke Vaslim
-                    <span id="panel-version" class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.10.0 gRPC🚀</span>
+                    <span id="panel-version" class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.11.0 XHTTP🚀</span>
                 </h1>
                 <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm flex-shrink-0 w-fit">
                     <a href="https://github.com/mkvaslim44/Ma_ke_vaslim-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="GitHub">
@@ -5507,11 +5996,14 @@ function setModalState(modalId, show) {
 					const isTlsPort = tlsPorts.includes(portStr);
 					const tlsVal = isTlsPort ? 'tls' : 'none';
 					const remarkWs = flagEmoji + ' | ' + customName + ' | WS | \\u200E' + ipOrDomain + ' | \\u200E' + portStr;
+					const remarkXHTTP = flagEmoji + ' | ' + customName + ' | XHTTP🚀 | \\u200E' + ipOrDomain + ' | \\u200E' + portStr;
 					const remarkGrpc = flagEmoji + ' | ' + customName + ' | gRPC🚀 | \\u200E' + ipOrDomain + ' | \\u200E' + portStr;
                     const proxyB64 = perIpProxy ? encodeProxyForPathUI(perIpProxy) : null;
                     const wsPath = proxyB64 ? '/p/' + proxyB64 + '/Ma_Ke_Vaslim' : '/Ma_Ke_Vaslim';
+                    const xhttpPath = wsPath;
+                    const grpcService = 'Ma_Ke_Vaslim';
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?path=' + encodeURIComponent(wsPath) + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + userFrag + '#' + encodeURIComponent(remarkWs));
-                    const grpcService = 'Ma_Ke_Vaslim'; // Fixed: no slashes for gRPC compatibility, per-IP proxy ignored for gRPC to ensure ping
+					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?path=' + encodeURIComponent(xhttpPath) + '&security=' + tlsVal + '&encryption=none&host=' + sniDomain + '&fp=' + fp + '&type=xhttp&mode=stream-one&host=' + sniDomain + '&extra=' + encodeURIComponent(JSON.stringify({xPaddingBytes: "100-1000", xmux: {maxConcurrency: "8-16"}})) + '&sni=' + sniDomain + userFrag + '#' + encodeURIComponent(remarkXHTTP));
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=' + encodeURIComponent(grpcService) + '&authority=' + sniDomain + '&alpn=h2' + userFrag + '#' + encodeURIComponent(remarkGrpc));
 				});
             });
@@ -6000,7 +6492,7 @@ async function testUserSocksProxy() {
                 window.location.reload();
             }
         }
-const CURRENT_VERSION = '1.10.0';
+const CURRENT_VERSION = '1.11.0';
 const UPDATE_FIX = "constsCURRENT_VERSION='d.d.d'";
 		async function checkForUpdates(isManual = false) {
             try {
@@ -6814,8 +7306,6 @@ window.addEventListener('click', (e) => {
 
             var links = [];
 
-            var sniDomain = "makv.cc.cd";
-
 
 
             ips.forEach(function(ip, ipIndex) {
@@ -6834,13 +7324,11 @@ window.addEventListener('click', (e) => {
 
 
 
-                    var remarkWs = ips.length > 1 ? (u.username + '-WS-' + (ipIndex + 1) + '-' + portStr) : (u.username + '-WS-' + portStr);
-                    var remarkGrpc = ips.length > 1 ? (u.username + '-gRPC🚀-' + (ipIndex + 1) + '-' + portStr) : (u.username + '-gRPC🚀-' + portStr);
+                    var remark = ips.length > 1 ? (u.username + '-' + (ipIndex + 1) + '-' + portStr) : (u.username + '-' + portStr);
 
 
 
-                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?path=%2FMa_Ke_Vaslim&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + '#' + encodeURIComponent(remarkWs));
-                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=Ma_Ke_Vaslim&authority=' + sniDomain + '&alpn=h2#' + encodeURIComponent(remarkGrpc));
+                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?path=%2FMa_Ke_Vaslim&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark));
 
 
 
