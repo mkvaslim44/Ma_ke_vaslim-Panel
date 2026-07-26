@@ -1588,8 +1588,11 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 	const grpcTask = (async () => {
 		try {
 			if (!request.body) {
-				try { await responseWriter.close(); } catch {}
-				return;
+				try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 			}
 			const reader = request.body.getReader();
 			while (true) {
@@ -1613,14 +1616,20 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 					if (!isHeaderParsed) {
 						let reqUUID = extractUUIDFromvIees(payload);
 						if (!reqUUID) {
-							try { await responseWriter.close(); } catch {}
+							try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
 							setOffline();
 							return;
 						}
 						let user = null;
 						try { user = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(reqUUID).first(); } catch (e) {}
 						if (!user) {
-							try { await responseWriter.close(); } catch {}
+							try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
 							return;
 						}
 						username = user.username;
@@ -1634,8 +1643,11 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 							const expiryDate = new Date(created.getTime() + user.expiry_days * 86400000);
 							if (new Date() > expiryDate) {
 								try { await env.DB.prepare("UPDATE users SET is_active = 0, last_active = 0 WHERE uuid = ?").bind(reqUUID).run(); } catch (e) {}
-								try { await responseWriter.close(); } catch {}
-								return;
+								try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 							}
 						}
 
@@ -1662,8 +1674,11 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 							if (!activeIps[clientIP]) {
 								const sorted = Object.keys(activeIps);
 								if (user.ip_limit && user.ip_limit > 0 && sorted.length >= user.ip_limit) {
-									try { await responseWriter.close(); } catch {}
-									return;
+									try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 								}
 								activeIps[clientIP] = { timestamp: now, count: 1 };
 								isNewIp = true;
@@ -1746,17 +1761,26 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 										}
 										tcpSocket.close();
 									} catch (e) {}
-									try { await responseWriter.close(); } catch {}
-									return;
+									try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 								} else {
-									try { await responseWriter.close(); } catch {}
-									return;
+									try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 								}
 							}
 
 							if (port === 25 || port === 22 || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.|::1|fd[0-9a-f]{2}:|fe80:)/i.test(addr)) {
-								try { await responseWriter.close(); } catch {}
-								return;
+								try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
+							return;
 							}
 
 							const connectTCP = async (dataPayload = null, useFallback = true) => {
@@ -1808,7 +1832,10 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 							await connectTCP(rawData, true);
 							isHeaderParsed = true;
 						} catch (e) {
-							try { await responseWriter.close(); } catch {}
+							try {
+								try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {}
+								await responseWriter.close();
+							} catch {}
 							setOffline();
 							return;
 						}
@@ -1820,7 +1847,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 				}
 			}
 		} catch (e) {
-			try { await responseWriter.close(); } catch {}
+			try { try { const _ef = createGrpcFrame(new Uint8Array(0)); await responseWriter.write(_ef); } catch {} await responseWriter.close(); } catch {}
 			setOffline();
 		}
 	})();
