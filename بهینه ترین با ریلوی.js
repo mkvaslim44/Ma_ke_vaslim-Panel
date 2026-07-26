@@ -1580,7 +1580,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 	let remoteConnWrapper = { socket: null };
 	let currentGrpcBuffer = new Uint8Array(0);
 	let isHeaderParsed = false;
-	let remoteWriter = null;
+	/** @type {any} */ let remoteWriter = null;
 
 	const grpcTask = (async () => {
 		try {
@@ -1811,7 +1811,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 						}
 					} else {
 						if (remoteWriter) {
-							try { await remoteWriter.write(payload); } catch (e) { try { await responseWriter.close(); } catch {} return; }
+							try { /* @ts-ignore - remoteWriter is WritableStreamDefaultWriter */ /* @ts-ignore */ await remoteWriter.write(payload); } catch (e) { try { await responseWriter.close(); } catch {} return; }
 						}
 					}
 				}
