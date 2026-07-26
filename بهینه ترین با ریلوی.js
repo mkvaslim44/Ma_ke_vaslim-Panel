@@ -1299,7 +1299,7 @@ const SubscriptionService = {
 				serviceName: serviceName,
 				fp: fingerprint,
 				authority: sniDomain,
-				alpn: "h2,http/1.1"
+				alpn: "h2"
 			});
 			let link = `vless://${uuid}@${cleanIp}:${port}?${params.toString()}`;
 			if (extraStr) link += `&extraParams=${extraStr}`;
@@ -1833,6 +1833,7 @@ async function handleVLESSGrpc(env, storedData = null, ctx = null, request = nul
 		headers: {
 			"content-type": "application/grpc",
 			"grpc-accept-encoding": "identity,deflate,gzip",
+			"grpc-status": "0",
 			"Cache-Control": "no-store",
 			"Access-Control-Allow-Origin": "*",
 			"Access-Control-Expose-Headers": "grpc-status,grpc-message,grpc-encoding,grpc-accept-encoding",
@@ -5484,7 +5485,7 @@ function setModalState(modalId, show) {
                     const wsPath = proxyB64 ? '/p/' + proxyB64 + '/Ma_Ke_Vaslim' : '/Ma_Ke_Vaslim';
 					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?path=' + encodeURIComponent(wsPath) + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + userFrag + '#' + encodeURIComponent(remarkWs));
                     const grpcService = 'Ma_Ke_Vaslim'; // Fixed: no slashes for gRPC compatibility, per-IP proxy ignored for gRPC to ensure ping
-					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=' + encodeURIComponent(grpcService) + '&authority=' + sniDomain + '&alpn=h2,http/1.1' + userFrag + '#' + encodeURIComponent(remarkGrpc));
+					links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ipOrDomain + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=' + encodeURIComponent(grpcService) + '&authority=' + sniDomain + '&alpn=h2' + userFrag + '#' + encodeURIComponent(remarkGrpc));
 				});
             });
             return links.join('\\n');
@@ -6812,7 +6813,7 @@ window.addEventListener('click', (e) => {
 
 
                     links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?path=%2FMa_Ke_Vaslim&security=' + tlsVal + '&encryption=none&insecure=0&host=' + sniDomain + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + sniDomain + '#' + encodeURIComponent(remarkWs));
-                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=Ma_Ke_Vaslim&authority=' + sniDomain + '&alpn=h2,http/1.1#' + encodeURIComponent(remarkGrpc));
+                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?security=' + tlsVal + '&encryption=none&sni=' + sniDomain + '&fp=' + fp + '&type=grpc&serviceName=Ma_Ke_Vaslim&authority=' + sniDomain + '&alpn=h2#' + encodeURIComponent(remarkGrpc));
 
 
 
