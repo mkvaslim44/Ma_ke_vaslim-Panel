@@ -23,7 +23,7 @@ const DOWNSTREAM_GRAIN_TAIL_THRESHOLD = 512;
 const DOWNSTREAM_GRAIN_SILENT_MS = 1;
 const TCP_CONCURRENCY = 4;
 const PRELOAD_RACE_DIAL = false;
-const MY_SECRET_DOMAIN = "cloudflare.workers.dev";
+const MY_SECRET_DOMAIN = "makv.cc.cd";
 let localLastAutoResetCheck = 0;
 let localLastIpRotateCheck = 0;
 async function fetchWithFallback(path, options = {}, cacheTtl = 3600, ctx = null) {
